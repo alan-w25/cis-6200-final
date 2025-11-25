@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import random
+from gymnasium import spaces
 from abc import ABC, abstractmethod
 from collections import deque
 
@@ -19,16 +20,46 @@ class PricingAgent(ABC):
     def update(self, transition):
         pass
 
+class FixedPriceAgent(PricingAgent):
+    """
+    Agent that always plays a fixed price.
+    """
+    def __init__(self, action_space, config=None):
+        super().__init__(action_space, config)
+        self.fixed_price = self.config.get('fixed_price', 1.0)
+        
+    def act(self, observation):
+        return self.fixed_price
+        
+    def update(self, transition):
+        pass
+
+class RandomAgent(PricingAgent):
+    """
+    Agent that plays a random price with a max and min price
+    """
+    def __init__(self, action_space, config=None):
+        super().__init__(action_space, config)
+        self.max_price = self.config.get('max_price')
+        self.min_price = 0.0
+        
+    def act(self, observation):
+        price = np.random.uniform(self.min_price, self.max_price)
+        return price
+        
+    def update(self, transition):
+        pass
+
 class NSRAgent(PricingAgent):
     """
-    No-Swap-Regret Agent using a simplified Online Multicalibrated Predictor approach.
-    Maintains calibration statistics for discretized action buckets.
+    No-Swap-Regret Agent using Matrix-Based Swap Regret Minimization.
+    Maintains a regret matrix R[i, j] for swapping from action i to action j.
+    Strategy is the stationary distribution of the regret-induced Markov chain.
     """
     def __init__(self, action_space, config=None):
         super().__init__(action_space, config)
         self.n_bins = self.config.get('n_bins', 100)
         self.learning_rate = self.config.get('learning_rate', 0.1)
-        self.epsilon = self.config.get('epsilon', 0.1)
         
         # Discretize action space
         self.actions = np.linspace(
@@ -37,59 +68,114 @@ class NSRAgent(PricingAgent):
             self.n_bins
         )
         
-        # Q-values or Preference values for each bin
-        # We can use a simple mean estimator or regret matching
-        # Here we implement a simple regret-based approach
-        self.regret_sum = np.zeros(self.n_bins)
+        # Swap Regret Matrix [N, N]
+        # Row i: Action played
+        # Col j: Counterfactual action
+        self.swap_regret_sum = np.zeros((self.n_bins, self.n_bins))
         self.strategy = np.ones(self.n_bins) / self.n_bins
         
-        self.last_action_idx = None
+        # Market Knowledge
+        self.quality = self.config.get('quality', 2.0)
+        self.price_sensitivity = self.config.get('price_sensitivity', 2.0)
+        self.cost = self.config.get('cost', 1.0)
         
     def act(self, observation):
-        # Regret Matching
-        positive_regret = np.maximum(self.regret_sum, 0)
-        sum_positive_regret = np.sum(positive_regret)
+        # Compute Stationary Distribution of Regret Matrix
         
-        if sum_positive_regret > 0:
-            self.strategy = positive_regret / sum_positive_regret
-        else:
+        # 1. Positive Regret Matrix M
+        M = np.maximum(self.swap_regret_sum, 0)
+        
+        # 2. Normalizing Constant mu
+        # Must be > sum of any row to ensure P_ii > 0
+        # We use max(sum(row)) + small_epsilon
+        row_sums = np.sum(M, axis=1)
+        mu = np.max(row_sums)
+        
+        if mu < 1e-9:
+            # No regret yet, uniform random
             self.strategy = np.ones(self.n_bins) / self.n_bins
+        else:
+            # 3. Transition Matrix P
+            # P_ij = M_ij / mu for i != j
+            # P_ii = 1 - sum_{k!=i} P_ik
+            
+            # Divide all by mu
+            P = M / mu
+            
+            # Fix diagonal: P_ii = 1 - (row_sum - M_ii)/mu
+            # But M_ii is 0 usually (regret of swapping i->i is 0)
+            # So P_ii = 1 - row_sum/mu
+            
+            # Vectorized diagonal update
+            # P[i, i] += 1 - row_sum[i]/mu
+            # Since we already divided M by mu, P currently holds M_ij/mu
+            # We need to set diagonal such that row sums to 1
+            
+            # Current row sums of P
+            current_P_row_sums = np.sum(P, axis=1)
+            
+            # Add residual to diagonal
+            diag_indices = np.arange(self.n_bins)
+            P[diag_indices, diag_indices] += (1.0 - current_P_row_sums)
+            
+            # 4. Compute Stationary Distribution
+            # Solve v P = v  =>  v (P - I) = 0  =>  (P.T - I) v = 0
+            # This is finding eigenvector for eigenvalue 1
+            
+            # We can use numpy's eig, but it's slow for 100x100 every step?
+            # Power iteration is faster if we have a good guess (previous strategy)
+            # Let's use power iteration for efficiency
+            
+            v = self.strategy.copy()
+            for _ in range(10): # 10 iterations usually sufficient for convergence if close
+                v = np.dot(v, P)
+                
+            self.strategy = v / np.sum(v)
             
         # Select action
-        action_idx = np.random.choice(self.n_bins, p=self.strategy)
-        self.last_action_idx = action_idx
+        # Handle numerical issues (negative probs)
+        self.strategy = np.maximum(self.strategy, 0)
+        self.strategy /= np.sum(self.strategy)
         
+        action_idx = np.random.choice(self.n_bins, p=self.strategy)
         return self.actions[action_idx]
         
     def update(self, transition):
-        # transition: (state, action, reward, next_state, done)
-        # For NSR, we need to estimate the counterfactual rewards for all other actions
-        # This is tricky in a general env without a model.
-        # However, in pricing, if we know the demand curve (or estimate it), we can do it.
-        # If we don't know the demand curve, we can't easily compute full regret vector 
-        # without importance sampling or a model.
-        
-        # The prompt mentions "Maintain 'bucketed' calibration stats... Apply additive 'patches'".
-        # This suggests a value-based approach where we learn V(s) or Q(s, a).
-        # Let's implement a tabular Q-learning approach which converges to Nash in zero-sum,
-        # but for general sum, we want No-Regret.
-        
-        # Given the specific "Algorithm 17" reference which I don't have, 
-        # I will stick to a standard bandit-style regret update (Exp3 or similar) 
-        # or just assume we observe the demand curve ex-post (common in these simulations).
-        
-        # Let's assume we get the full profit function info or can estimate it.
-        # For now, I'll implement a simple Q-learning update on the discretized bins
-        # which acts as a proxy for "calibrated predictor". 
-        # To be strictly NSR, we need to track regret for swapping i -> j.
-        
-        # Simplified: Update Q-value of taken action towards reward
         state, action, reward, next_state, done = transition
         
-        # We need to update the regret for NOT having played other actions.
-        # But we don't know their rewards. 
-        # Let's assume we use the observed reward to update the estimate for the chosen action.
-        pass
+        # Find index of chosen action
+        # We need the exact index corresponding to 'action'
+        # Since action is continuous, we find closest bin
+        chosen_idx = np.argmin(np.abs(self.actions - action))
+        
+        # 1. Infer Competitor Price / Market State
+        if abs(action - self.cost) < 1e-6:
+            return 
+            
+        observed_share = reward / (action - self.cost)
+        observed_share = np.clip(observed_share, 1e-6, 1.0 - 1e-6)
+        
+        v_own = self.quality - self.price_sensitivity * action
+        exp_v_own = np.exp(v_own)
+        
+        competitor_agg_utility = exp_v_own * (1.0/observed_share - 1.0) - 1.0
+        competitor_agg_utility = max(competitor_agg_utility, 0.0)
+        
+        # 2. Calculate Counterfactual Rewards for ALL actions
+        v_own_all = self.quality - self.price_sensitivity * self.actions
+        exp_v_own_all = np.exp(v_own_all)
+        
+        shares_all = exp_v_own_all / (1.0 + exp_v_own_all + competitor_agg_utility)
+        profits_all = (self.actions - self.cost) * shares_all
+        
+        # 3. Update Swap Regret Matrix
+        # Only update the row for the action we actually played (chosen_idx)
+        # Regret(i -> j) = Profit(j) - Profit(i)
+        # Profit(i) is the realized reward
+        
+        regrets = profits_all - reward
+        self.swap_regret_sum[chosen_idx, :] += regrets
+
 
 class RLAgent(PricingAgent):
     """
