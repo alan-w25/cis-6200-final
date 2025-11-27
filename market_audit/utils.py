@@ -1,9 +1,28 @@
 import pandas as pd
 
-def run_episode(env, agent1, agent2, label):
+def run_episode(env, agent1, agent2, label, train_mode=True):
+    """
+    Runs a single episode of the market simulation.
+    
+    Args:
+        env: The market environment.
+        agent1: The first agent.
+        agent2: The second agent.
+        label: Label for the episode data.
+        train_mode: If True, agents explore and update. If False, agents are in eval mode (no exploration, no updates).
+    """
     state, _ = env.reset()
     done = False
     history = []
+    
+    # Set agents to appropriate mode if they support it
+    if hasattr(agent1, 'train') and hasattr(agent1, 'eval'):
+        if train_mode: agent1.train()
+        else: agent1.eval()
+        
+    if hasattr(agent2, 'train') and hasattr(agent2, 'eval'):
+        if train_mode: agent2.train()
+        else: agent2.eval()
     
     step_count = 0
     while not done:
@@ -12,8 +31,10 @@ def run_episode(env, agent1, agent2, label):
         
         next_state, rewards, done, _, info = env.step([a1, a2])
         
-        agent1.update((state, a1, rewards[0], next_state, done))
-        agent2.update((state, a2, rewards[1], next_state, done))
+        # Only update agents if in training mode
+        if train_mode:
+            agent1.update((state, a1, rewards[0], next_state, done))
+            agent2.update((state, a2, rewards[1], next_state, done))
         
         history.append({
             'step': step_count,
@@ -24,7 +45,8 @@ def run_episode(env, agent1, agent2, label):
             'r2': rewards[1],
             'demand_shock': info.get('demand_shock', 0),
             'c1': info.get('costs', [0, 0])[0],
-            'c2': info.get('costs', [0, 0])[1]
+            'c2': info.get('costs', [0, 0])[1],
+            'train_mode': train_mode
         })
         
         state = next_state

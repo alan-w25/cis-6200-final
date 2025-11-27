@@ -20,6 +20,20 @@ class PricingAgent(ABC):
     def update(self, transition):
         pass
 
+    def eval(self):
+        """
+        Switch agent to evaluation mode (e.g., disable exploration).
+        Default implementation does nothing.
+        """
+        pass
+
+    def train(self):
+        """
+        Switch agent to training mode (e.g., enable exploration).
+        Default implementation does nothing.
+        """
+        pass
+
 class FixedPriceAgent(PricingAgent):
     """
     Agent that always plays a fixed price.
@@ -220,16 +234,26 @@ class RLAgent(PricingAgent):
         
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.lr)
         self.memory = deque(maxlen=self.memory_size)
+        self.training = True
         
     def act(self, observation):
-        if np.random.rand() < self.epsilon:
+        if self.training and np.random.rand() < self.epsilon:
             return np.random.choice(self.actions)
         
         state_t = torch.FloatTensor(observation).unsqueeze(0)
         with torch.no_grad():
             q_values = self.q_net(state_t)
         action_idx = q_values.argmax().item()
+        action_idx = q_values.argmax().item()
         return self.actions[action_idx]
+
+    def eval(self):
+        """Turn off exploration."""
+        self.training = False
+
+    def train(self):
+        """Turn on exploration."""
+        self.training = True
         
     def update(self, transition):
         self.memory.append(transition)
