@@ -116,7 +116,7 @@ def plot_generalized_convergence(df_history, env_config, title_suffix="", plot_b
     
     # Agent 2
     plt.plot(df_history['step'], df_history['p2'], 
-             label='Agent 2 Price', color='red', linewidth=1.5, alpha=0.8)
+             label='Agent 2 Price', color='red', linewidth=1.5, alpha=0.6)
     if plot_br2:
         plt.plot(df_history['step'], br_p2, 
                  label='Agent 2 BR (Target)', color='red', linestyle='--', linewidth=1.5, alpha=0.4)

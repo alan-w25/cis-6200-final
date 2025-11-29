@@ -15,9 +15,16 @@ class PricingAgent(ABC):
     @abstractmethod
     def act(self, observation):
         pass
-        
+    
     @abstractmethod
     def update(self, transition):
+        pass
+
+    def reset(self):
+        """
+        Reset the agent's internal state (e.g. weights, regret matrix) to initial conditions.
+        Default implementation does nothing.
+        """
         pass
 
     def eval(self):
@@ -92,6 +99,11 @@ class NSRAgent(PricingAgent):
         self.quality = self.config.get('quality', 2.0)
         self.price_sensitivity = self.config.get('price_sensitivity', 2.0)
         self.cost = self.config.get('cost', 1.0)
+        
+    def reset(self):
+        """Reset regret matrix and strategy to uniform."""
+        self.swap_regret_sum = np.zeros((self.n_bins, self.n_bins))
+        self.strategy = np.ones(self.n_bins) / self.n_bins
         
     def act(self, observation):
         # Compute Stationary Distribution of Regret Matrix
@@ -235,6 +247,22 @@ class RLAgent(PricingAgent):
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.lr)
         self.memory = deque(maxlen=self.memory_size)
         self.training = True
+        
+    def reset(self):
+        """Reset Q-networks, optimizer, and replay buffer."""
+        # Re-initialize networks
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                torch.nn.init.xavier_uniform_(m.weight)
+                m.bias.data.fill_(0.01)
+                
+        self.q_net.apply(init_weights)
+        self.target_net.load_state_dict(self.q_net.state_dict())
+        
+        # Reset optimizer and memory
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.lr)
+        self.memory = deque(maxlen=self.memory_size)
+        self.epsilon = self.config.get('epsilon', 1.0) # Reset epsilon too
         
     def act(self, observation):
         if self.training and np.random.rand() < self.epsilon:
