@@ -14,7 +14,7 @@ def run_episode(env, agent1, agent2, label, train_mode=True):
         label: Label for the episode data.
         train_mode: If True, agents explore and update. If False, agents are in eval mode (no exploration, no updates).
     """
-    state, _ = env.reset()
+    state, _ = env.reset(seed=42)
     done = False
     history = []
     
@@ -241,7 +241,7 @@ def calculate_instantaneous_benchmarks(demand_shock, costs, env_config):
     
     return ne_prices, collusive_prices
 
-def plot_price_gap(df_history, env_config, title_suffix=""):
+def plot_price_gap(df_history, env_config, title_suffix="", agent_1_label="Agent 1", agent_2_label="Agent 2"):
     """
     Plots the gap between Agents' prices and their respective Nash Equilibrium prices.
     Gap = Price_Agent - Price_NE
@@ -261,10 +261,10 @@ def plot_price_gap(df_history, env_config, title_suffix=""):
     plt.figure(figsize=(14, 7))
     
     # Agent 1 Gap
-    plt.plot(df_history['step'], gaps_p1, label='Agent 1 Gap (P1 - NE1)', color='blue', linewidth=1.5, alpha=0.8)
+    plt.plot(df_history['step'], gaps_p1, label=f'{agent_1_label} Gap (P1 - NE1)', color='blue', linewidth=1.5, alpha=0.8)
     
     # Agent 2 Gap
-    plt.plot(df_history['step'], gaps_p2, label='Agent 2 Gap (P2 - NE2)', color='red', linewidth=1.5, alpha=0.8)
+    plt.plot(df_history['step'], gaps_p2, label=f'{agent_2_label} Gap (P2 - NE2)', color='red', linewidth=1.5, alpha=0.8)
     
     # Zero Line (Nash Equilibrium)
     plt.axhline(0, color='black', linestyle='--', alpha=0.5, label='Nash Equilibrium')
@@ -279,7 +279,7 @@ def plot_price_gap(df_history, env_config, title_suffix=""):
     if len(df_history) > 50:
         ma_gap1 = pd.Series(gaps_p1).rolling(window=20).mean()
         ma_gap2 = pd.Series(gaps_p2).rolling(window=20).mean()
-        plt.plot(df_history['step'], ma_gap1, color='blue', linewidth=2, alpha=0.4, label='Gap 1 (MA-20)')
-        plt.plot(df_history['step'], ma_gap2, color='red', linewidth=2, alpha=0.4, label='Gap 2 (MA-20)')
+        plt.plot(df_history['step'], ma_gap1, color='blue', linewidth=2, alpha=0.4, label=f'{agent_1_label} Gap (MA-20)')
+        plt.plot(df_history['step'], ma_gap2, color='red', linewidth=2, alpha=0.4, label=f'{agent_2_label} Gap (MA-20)')
         
     plt.show()
