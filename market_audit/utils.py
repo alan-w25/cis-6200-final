@@ -283,3 +283,48 @@ def plot_price_gap(df_history, env_config, title_suffix="", agent_1_label="Agent
         plt.plot(df_history['step'], ma_gap2, color='red', linewidth=2, alpha=0.4, label=f'{agent_2_label} Gap (MA-20)')
         
     plt.show()
+
+def get_price_gaps(df_history, env_config):
+    """
+    Calculates the gap between Agents' prices and their respective Nash Equilibrium prices.
+    Returns a DataFrame with columns ['step', 'gap_p1', 'gap_p2'].
+    """
+    gaps_p1 = []
+    gaps_p2 = []
+    
+    for _, row in df_history.iterrows():
+        shock = row['demand_shock']
+        costs = [row['c1'], row['c2']]
+        
+        ne_p, _ = calculate_instantaneous_benchmarks(shock, costs, env_config)
+        
+        gaps_p1.append(row['p1'] - ne_p[0])
+        gaps_p2.append(row['p2'] - ne_p[1])
+        
+    return pd.DataFrame({
+        'step': df_history['step'],
+        'gap_p1': gaps_p1,
+        'gap_p2': gaps_p2
+    })
+
+def plot_price_gap_density(df_history, env_config, agent_1_label="Agent 1", agent_2_label="Agent 2", title_suffix=""):
+    """
+    Plots the density distribution of price gaps for both agents.
+    """
+    df_gaps = get_price_gaps(df_history, env_config)
+    
+    plt.figure(figsize=(10, 6))
+    
+    # Plot KDE (Kernel Density Estimate)
+    df_gaps['gap_p1'].plot(kind='kde', label=f'{agent_1_label} Gap', color='blue', linewidth=2)
+    df_gaps['gap_p2'].plot(kind='kde', label=f'{agent_2_label} Gap', color='red', linewidth=2)
+    
+    plt.axvline(0, color='black', linestyle='--', alpha=0.5, label='Nash Equilibrium')
+    
+    plt.title(f'Price Gap Density Distribution {title_suffix}')
+    plt.xlabel('Price Gap ($)')
+    plt.ylabel('Density')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
