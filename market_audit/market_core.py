@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
+from .nash_oracle import NashOracle
 
 class DuopolyEnv(gym.Env):
     """
@@ -33,14 +34,26 @@ class DuopolyEnv(gym.Env):
         self.demand_shock_std = self.config.get('demand_shock_std', 0.1)
         self.demand_shock_phi = self.config.get('demand_shock_phi', 0.5)
         
-        # Regime Switch Parameters
-        # Boom: High Quality, Low Sensitivity
-        self.boom_quality = np.array(self.config.get('boom_quality', [2.5, 2.5]))
-        self.boom_sensitivity = self.config.get('boom_sensitivity', 0.8)
-        # Recession: Low Quality, High Sensitivity
-        self.recession_quality = np.array(self.config.get('recession_quality', [1.5, 1.5]))
-        self.recession_sensitivity = self.config.get('recession_sensitivity', 1.5)
-        self.regime_transition_prob = self.config.get('regime_transition_prob', 0.05)
+        # Regime Switch Parameters (3-State Markov Chain)
+        # Regime 0: Recession - Low Quality, High Sensitivity (consumers broke and picky)
+        self.recession_quality = np.array(self.config.get('recession_quality', [1.0, 1.0]))
+        self.recession_sensitivity = self.config.get('recession_sensitivity', 1.0)
+
+        # Regime 1: Normal/Stagnation - Baseline calibration
+        self.normal_quality = np.array(self.config.get('normal_quality', [2.0, 2.0]))
+        self.normal_sensitivity = self.config.get('normal_sensitivity', 0.8)
+
+        # Regime 2: Boom - High Quality, Low Sensitivity (consumers flush with cash)
+        self.boom_quality = np.array(self.config.get('boom_quality', [3.0, 3.0]))
+        self.boom_sensitivity = self.config.get('boom_sensitivity', 0.5)
+
+        # Transition Matrix: T[i,j] = P(s_{t+1}=j | s_t=i)
+        # High self-transition (0.98) creates sticky regimes ~50 steps average duration
+        self.transition_matrix = np.array(self.config.get('transition_matrix', [
+            [0.98, 0.02, 0.00],  # From Recession
+            [0.01, 0.98, 0.01],  # From Normal
+            [0.00, 0.02, 0.98]   # From Boom
+        ]))
         
         # Cost Dynamics (AR(1) for all modes unless disabled via config)
         self.cost_std = self.config.get('cost_std', 0.05)
@@ -62,7 +75,13 @@ class DuopolyEnv(gym.Env):
         
         # Internal state for dynamics
         self.current_demand_shock = 0.0
-        self.current_regime = 0 # 0: Boom, 1: Recession
+        self.current_regime = 1 # 0: Recession, 1: Normal, 2: Boom
+
+        # Market size (total consumer mass)
+        self.market_size = self.config.get('market_size', 1.0)
+
+        # Initialize Nash Oracle for computing theoretical benchmarks
+        self.nash_oracle = NashOracle()
         
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -83,8 +102,10 @@ class DuopolyEnv(gym.Env):
             self.current_demand_shock = self.np_random.normal(self.demand_shock_mean, std)
             
         elif self.market_mode == 'regime_switch':
-            # Randomly pick initial regime
-            self.current_regime = 0 if self.np_random.random() < 0.5 else 1
+            # Initialize regime with stationary distribution of Markov chain
+            # For simplicity, start in Normal regime (can be randomized)
+            regime_probs = self.config.get('initial_regime_probs', [0.0, 1.0, 0.0])
+            self.current_regime = self.np_random.choice([0, 1, 2], p=regime_probs)
             self.current_demand_shock = float(self.current_regime) # Signal is regime index
             
         # Initialize Costs (AR process)
@@ -126,13 +147,16 @@ class DuopolyEnv(gym.Env):
             
         elif self.market_mode == 'regime_switch':
             # Use current regime for this step's dynamics
-            if self.current_regime == 0: # Boom
-                current_quality = self.boom_quality
-                current_beta = self.boom_sensitivity
-            else: # Recession
+            if self.current_regime == 0: # Recession
                 current_quality = self.recession_quality
                 current_beta = self.recession_sensitivity
-            
+            elif self.current_regime == 1: # Normal
+                current_quality = self.normal_quality
+                current_beta = self.normal_sensitivity
+            else: # Boom (regime == 2)
+                current_quality = self.boom_quality
+                current_beta = self.boom_sensitivity
+
             # Signal is regime index
             shock_value = 0.0 # Shock absorbed into alpha/beta changes
             
@@ -163,10 +187,11 @@ class DuopolyEnv(gym.Env):
             next_signal = self.current_demand_shock
             
         elif self.market_mode == 'regime_switch':
-            # Update Regime (Markov Transition) for NEXT step
-            if self.np_random.random() < self.regime_transition_prob:
-                self.current_regime = 1 - self.current_regime
-            
+            # Update Regime using Markov Transition Matrix
+            # Sample next regime based on current regime's transition probabilities
+            transition_probs = self.transition_matrix[self.current_regime]
+            self.current_regime = self.np_random.choice([0, 1, 2], p=transition_probs)
+
             # Signal is the updated regime
             next_signal = float(self.current_regime)
             
@@ -196,3 +221,69 @@ class DuopolyEnv(gym.Env):
 
     def render(self):
         pass
+
+    def get_current_nash_equilibrium(self):
+        """
+        Compute Nash equilibrium for the current market state.
+
+        Returns:
+            dict with nash_prices, jpm_prices, and market parameters
+        """
+        # Extract current costs from state
+        current_costs = self.state[3:5] if self.state is not None else self.production_costs_mean
+
+        # Get current market parameters based on mode
+        if self.market_mode == 'static':
+            quality = self.base_quality
+            beta = self.base_price_sensitivity
+
+        elif self.market_mode == 'ar_drift':
+            quality = self.base_quality
+            beta = self.base_price_sensitivity
+            # Note: AR drift affects utility additively, not through alpha/beta
+
+        elif self.market_mode == 'regime_switch':
+            # Use current regime parameters
+            if self.current_regime == 0:  # Recession
+                quality = self.recession_quality
+                beta = self.recession_sensitivity
+            elif self.current_regime == 1:  # Normal
+                quality = self.normal_quality
+                beta = self.normal_sensitivity
+            else:  # Boom
+                quality = self.boom_quality
+                beta = self.boom_sensitivity
+        else:
+            quality = self.base_quality
+            beta = self.base_price_sensitivity
+
+        # Compute Nash equilibrium
+        nash_prices, nash_profits, converged = self.nash_oracle.compute_nash_equilibrium(
+            current_costs, quality, beta
+        )
+
+        # Compute Joint Profit Maximum
+        jpm_prices, jpm_profits, total_jpm = self.nash_oracle.compute_joint_profit_maximum(
+            current_costs, quality, beta
+        )
+
+        return {
+            'nash_prices': nash_prices,
+            'nash_profits': nash_profits,
+            'jpm_prices': jpm_prices,
+            'jpm_profits': jpm_profits,
+            'costs': current_costs,
+            'quality': quality,
+            'beta': beta,
+            'regime': self.current_regime if self.market_mode == 'regime_switch' else None,
+            'converged': converged
+        }
+
+    def get_regime_name(self, regime=None):
+        """Get human-readable name for regime."""
+        if regime is None:
+            regime = self.current_regime
+
+        regime_names = {0: 'Recession', 1: 'Normal', 2: 'Boom'}
+        return regime_names.get(regime, 'Unknown')
+

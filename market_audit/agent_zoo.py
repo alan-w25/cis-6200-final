@@ -247,6 +247,12 @@ class RLAgent(PricingAgent):
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.lr)
         self.memory = deque(maxlen=self.memory_size)
         self.training = True
+
+        # Brier Score logging for Internal Audit
+        self.enable_brier_logging = self.config.get('enable_brier_logging', True)
+        self.brier_window = self.config.get('brier_window', 500)
+        self.prediction_log = deque(maxlen=10000)  # Store (predicted_q, actual_reward)
+        self.brier_scores = []  # Rolling Brier Scores
         
     def reset(self):
         """Reset Q-networks, optimizer, and replay buffer."""
@@ -263,16 +269,26 @@ class RLAgent(PricingAgent):
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.lr)
         self.memory = deque(maxlen=self.memory_size)
         self.epsilon = self.config.get('epsilon', 1.0) # Reset epsilon too
+
+        # Reset Brier logging
+        self.prediction_log = deque(maxlen=10000)
+        self.brier_scores = []
         
     def act(self, observation):
         if self.training and np.random.rand() < self.epsilon:
             return np.random.choice(self.actions)
-        
+
         state_t = torch.FloatTensor(observation).unsqueeze(0)
         with torch.no_grad():
             q_values = self.q_net(state_t)
         action_idx = q_values.argmax().item()
-        action_idx = q_values.argmax().item()
+
+        # Store predicted Q-value for Brier Score logging
+        if self.enable_brier_logging:
+            self.last_predicted_q = q_values[0, action_idx].item()
+            self.last_state = observation
+            self.last_action_idx = action_idx
+
         return self.actions[action_idx]
 
     def eval(self):
@@ -284,6 +300,17 @@ class RLAgent(PricingAgent):
         self.training = True
         
     def update(self, transition):
+        # Log prediction vs. actual reward for Brier Score
+        if self.enable_brier_logging and hasattr(self, 'last_predicted_q'):
+            state, action, reward, next_state, done = transition
+            self.prediction_log.append((self.last_predicted_q, reward))
+
+            # Calculate rolling Brier Score
+            if len(self.prediction_log) >= self.brier_window:
+                recent_predictions = list(self.prediction_log)[-self.brier_window:]
+                brier_score = self._calculate_brier_score(recent_predictions)
+                self.brier_scores.append(brier_score)
+
         self.memory.append(transition)
         if len(self.memory) < self.batch_size:
             return
@@ -320,6 +347,124 @@ class RLAgent(PricingAgent):
         
     def update_target_network(self):
         self.target_net.load_state_dict(self.q_net.state_dict())
+
+    def _calculate_brier_score(self, predictions):
+        """
+        Calculate Brier Score for calibration measurement.
+
+        Brier Score = (1/N) * sum((predicted_q - actual_reward)^2)
+
+        Args:
+            predictions: List of (predicted_q, actual_reward) tuples
+
+        Returns:
+            float: Brier Score (lower is better, 0 = perfect calibration)
+        """
+        if not predictions:
+            return 0.0
+
+        predicted_values = np.array([p[0] for p in predictions])
+        actual_rewards = np.array([p[1] for p in predictions])
+
+        squared_errors = (predicted_values - actual_rewards) ** 2
+        brier_score = np.mean(squared_errors)
+
+        return brier_score
+
+    def _calculate_brier_decomposition(self, predictions):
+        """
+        Decompose Brier Score into Reliability, Resolution, and Uncertainty.
+
+        Brier Score = Reliability - Resolution + Uncertainty
+
+        Reliability: Calibration error (how well predictions match average outcomes)
+        Resolution: Refinement (how much predictions vary from overall average)
+        Uncertainty: Inherent variability in the data
+
+        Args:
+            predictions: List of (predicted_q, actual_reward) tuples
+
+        Returns:
+            dict with 'brier_score', 'reliability', 'resolution', 'uncertainty'
+        """
+        if not predictions:
+            return {'brier_score': 0.0, 'reliability': 0.0, 'resolution': 0.0, 'uncertainty': 0.0}
+
+        predicted_values = np.array([p[0] for p in predictions])
+        actual_rewards = np.array([p[1] for p in predictions])
+
+        # Overall mean of actual outcomes
+        overall_mean = np.mean(actual_rewards)
+
+        # Brier Score
+        brier_score = np.mean((predicted_values - actual_rewards) ** 2)
+
+        # Uncertainty: Variance of actual outcomes
+        uncertainty = np.mean((actual_rewards - overall_mean) ** 2)
+
+        # For decomposition, bin predictions into groups
+        # Use 10 bins for predicted values
+        n_bins = min(10, len(predictions) // 10)
+        if n_bins < 2:
+            # Not enough data for binning
+            return {
+                'brier_score': brier_score,
+                'reliability': brier_score,
+                'resolution': 0.0,
+                'uncertainty': uncertainty
+            }
+
+        # Create bins based on predicted values
+        bins = np.percentile(predicted_values, np.linspace(0, 100, n_bins + 1))
+        bin_indices = np.digitize(predicted_values, bins[:-1]) - 1
+        bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+
+        # Calculate reliability and resolution
+        reliability = 0.0
+        resolution = 0.0
+
+        for i in range(n_bins):
+            mask = bin_indices == i
+            if not np.any(mask):
+                continue
+
+            bin_predictions = predicted_values[mask]
+            bin_actuals = actual_rewards[mask]
+            bin_size = len(bin_actuals)
+
+            # Mean prediction and actual in this bin
+            mean_pred = np.mean(bin_predictions)
+            mean_actual = np.mean(bin_actuals)
+
+            # Reliability: weighted squared difference between mean prediction and mean actual
+            reliability += (bin_size / len(predictions)) * (mean_pred - mean_actual) ** 2
+
+            # Resolution: weighted squared difference between bin mean and overall mean
+            resolution += (bin_size / len(predictions)) * (mean_actual - overall_mean) ** 2
+
+        return {
+            'brier_score': brier_score,
+            'reliability': reliability,
+            'resolution': resolution,
+            'uncertainty': uncertainty
+        }
+
+    def get_brier_scores(self):
+        """Get history of rolling Brier Scores."""
+        return self.brier_scores
+
+    def get_current_calibration_stats(self):
+        """
+        Get current calibration statistics.
+
+        Returns:
+            dict with Brier Score decomposition for recent window
+        """
+        if len(self.prediction_log) < self.brier_window:
+            return None
+
+        recent_predictions = list(self.prediction_log)[-self.brier_window:]
+        return self._calculate_brier_decomposition(recent_predictions)
 
 class ConstrainedRLAgent(RLAgent):
     """

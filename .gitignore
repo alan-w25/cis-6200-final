@@ -1,2 +1,7 @@
 venv/
 __pycache__/
+claude_sprints/
+deliverables/
+market_audit/ignore/ 
+market_audit/env_config.json
+results/
